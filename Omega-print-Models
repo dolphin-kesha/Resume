@@ -1,0 +1,65 @@
+<?php
+
+namespace app\models\product;
+
+use Yii;
+
+/**
+ * This is the model class for table "product".
+ *
+ * @property int $id
+ * @property string $name
+ * @property string $descript
+ * @property string $status
+ * @property string $img
+ * @property int $key
+ * @property int $rating
+ * @property string $characteristic
+ * @property string $сonsumables
+ * @property int $sale
+ * @property int $id_shop
+ */
+class Products extends \yii\db\ActiveRecord
+{
+    /**
+     * {@inheritdoc}
+     */
+    public static function tableName()
+    {
+        return 'product';
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function rules()
+    {
+        return [
+            [['name', 'descript', 'status', 'img', 'key', 'characteristic', 'сonsumables'], 'required'],
+            [['descript', 'img', 'characteristic', 'сonsumables'], 'string'],
+            [['key', 'rating', 'sale', 'id_shop'], 'integer'],
+            [['name'], 'string', 'max' => 255],
+            [['status'], 'string', 'max' => 30],
+        ];
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function attributeLabels()
+    {
+        return [
+            'id' => 'ID',
+            'name' => 'Name',
+            'descript' => 'Descript',
+            'status' => 'Status',
+            'img' => 'Img',
+            'key' => 'Key',
+            'rating' => 'Rating',
+            'characteristic' => 'Characteristic',
+            'сonsumables' => 'уonsumables',
+            'sale' => 'Sale',
+            'id_shop' => 'Id Shop',
+        ];
+    }
+}
