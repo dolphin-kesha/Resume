@@ -1,0 +1,417 @@
+<?php
+/**
+ * Created by PhpStorm.
+ * User: emrissol
+ * Date: 22-Oct-18
+ * Time: 6:30 PM
+ */
+namespace  app\modules\admin\controllers;
+use app\controllers\AppController;
+use app\models\category\CategoryProduct;
+use app\models\product\Catalog;
+use app\models\product\Incoterm;
+use app\models\product\Package;
+use app\models\product\ProdProviding;
+use app\models\Product;
+use app\models\product\ProductCertScan;
+use app\modules\admin\models\search\ProductSearchOld;
+use Yii;
+use yii\base\UserException;
+use yii\filters\VerbFilter;
+use yii\helpers\Json;
+use yii\web\UploadedFile;
+
+class ProductController extends AppController
+{
+    public function behaviors()
+    {
+        return [
+            'verbs' => [
+                'class' => VerbFilter::className(),
+                'actions' => [
+                    'delete' => ['POST'],
+                ],
+            ],
+        ];
+    }
+
+
+    public function actionIndex(){
+        $title = t_app('Продукты');
+        $searchModel = new ProductSearchOld();
+        $dataProvider = $searchModel->search(\Yii::$app->request->queryParams);
+        $dataProvider->setPagination(['pageSize' => 18]);
+        return $this->render('index', [
+            'title' => $title,
+            'searchModel' => $searchModel,
+            'dataProvider' => $dataProvider,
+        ]);
+    }
+
+
+    public function actionCreate(){
+        if(Yii::$app->user->isGuest) {
+            return $this->goHome();
+        }
+        $user = Yii::$app->user;
+        $title = t_app('Создать продукт');
+
+        $product = new Product();
+        $product->avail_from = date('d-m-Y', time());
+        $product->avail_to= date('d-m-Y', time());
+        $catalog = new Catalog();
+        $prodCertScan = new ProductCertScan();
+
+        $categories = CategoryProduct::getCategoriesAsList2();
+        $prodProvidings = ProdProviding::getAllAsAssoc();
+
+        $packages = Package::getAllAsAssoc();
+        $incoterms = Incoterm::getAllAsAssoc();
+
+        $renderParams = [
+            'title' => $title,
+            'product' => $product,
+            'catalog' => $catalog,
+            'prodCertScan' => $prodCertScan,
+
+            'categories' => $categories,
+            'packages' => $packages,
+            'prodProvidings' => $prodProvidings,
+            'incoterms' => $incoterms,
+        ];
+
+
+        if( $product->load(Yii::$app->request->post())
+            && $catalog->load(Yii::$app->request->post())
+            && $prodCertScan->load(Yii::$app->request->post())
+        )
+        {
+            $image = UploadedFile::getInstance($product, 'image');
+            if($image){
+                $product->img_src = saveUniFile("uploads/product/image/", $image->tempName, $image->name, ["extension" => ["jpg", "png", "jpeg"]]);
+            }
+            $package = Package::findOne(["id" => $product->package]);
+            if(!is_null($package)){
+                $product->package_id = $package->id;
+            }else{
+                $package = new Package();
+                $package->name = $product->package;
+                $package->save();
+                $newPackage = Package::findOne(['name' => $package->name]);
+                $product->package_id = $newPackage->id;
+            }
+            if( !$this->isDateSet() ){
+                addAlert("warning", t_app("Период \"Доступность предложения\" не установлен!"));
+                return $this->render('create', $renderParams);
+            }else{
+                $date_begin =  date( 'Y-m-d H:i:s', strtotime( Yii::$app->request->post('avail_from') ) );
+                $date_end =  date( 'Y-m-d H:i:s', strtotime( Yii::$app->request->post('avail_to') ) );
+                $product->avail_from = $date_begin;
+                $product->avail_to = $date_end;
+            }
+            $product->user_id = $user->id;
+            $product->country = getCountryList()[$product->country];
+
+
+            $infoAttachments = UploadedFile::getInstances($product, 'attach_files');
+            if( !empty($infoAttachments)){
+                $arr = [];
+                foreach ($infoAttachments as $img){
+                    $arr[]= saveUniFile("uploads/product/attachments/", $img->tempName, $img->name);
+                }
+                $product->info_attach = Json::encode($arr);
+            }
+
+            $product->is_confirmed = true; //TODO
+            if($product->save())
+            {
+                $scan_imgs = UploadedFile::getInstances($prodCertScan, 'scan_img');
+                if(!empty($scan_imgs)){
+                    $prodCertScanText = $prodCertScan->scan_text;
+                    for ($i=0; $i<sizeof($scan_imgs); $i++) {
+                        if ($scan_imgs[$i]) {
+                            $img = $scan_imgs[$i];
+                            $prodScan = new ProductCertScan();
+                            $prodScan->product_id = $product->getPrimaryKey();
+                            $prodScan->text = $prodCertScanText[$i];
+                            $prodScan->src = saveUniFile("uploads/product/certificate/", $img->tempName, $img->name, ["extension" => ["jpg", "png", "jpeg"]]);
+                            $prodScan->save();
+                        }
+                    }
+                }
+                $catalog_files = UploadedFile::getInstances($catalog, "files");
+                if( !empty($catalog_files) ){
+                    $catalog_langs = $catalog->langs;
+                    for ($i=0; $i<sizeof($catalog_files); $i++) {
+                        $file = $catalog_files[$i];
+                        if($file){
+                            $cat = new Catalog();
+                            $cat->product_id = $product->getPrimarykey();
+                            $cat->lang = $catalog_langs[$i];
+                            $cat->src = saveUniFile("uploads/product/catalog/", $file->tempName, $file->name, ['extensions' => ["pdf"]]);
+                            $cat->save(false);
+                        }
+                    }
+                }
+                $product->categoriesAfterSave();
+                $product->incotermsListAfterSave();
+                $product->groupListAfterSave();
+                $product->provideListAfterSave();
+                return $this->redirect(['/admin/product/all/index']);
+            }
+        }
+        return $this->render('create', $renderParams);
+    }
+    public function actionUpdate($id)
+    {
+        $product = $this->findModel($id);
+        $product->incotermsList = $product->getIncoterms();
+
+        $modelCatalog = new Catalog();
+        $modelCertScan = new ProductCertScan();
+        $product->country = array_search($product->country, getCountryList());
+        $product->incotermsList = $product->incoterms;
+        $product->provideList = $product->provides;
+        $product->groupList = $product->groups;
+        $product->catList = $product->categories;
+        $catalogs = Catalog::find()->where(["product_id" => $product->id])->all();
+        $prodCertScans = ProductCertScan::find()->where(["product_id" => $product->id])->all();
+
+        $categories = CategoryProduct::getCategoriesAsList2();
+        $prodProvidings = ProdProviding::getAllAsAssoc();
+
+        $packages = Package::getAllAsAssoc();
+        $incoterms = Incoterm::getAllAsAssoc();
+
+        $prod_attachments = Json::decode($product->info_attach);
+
+        $title = $product->name;
+        $renderParams = [
+            'title' => $title,
+
+            'product' => $product,
+            'catalogs' => $catalogs,
+            'prodCertScans' => $prodCertScans,
+            'prod_attachments' => $prod_attachments,
+
+            'modelCertScan' => $modelCertScan,
+            'modelCatalog' => $modelCatalog,
+
+            'categories' => $categories,
+            'packages' => $packages,
+            'prodProvidings' => $prodProvidings,
+            'incoterms' => $incoterms,
+        ];
+        $request = Yii::$app->request;
+        if( $product->load($request->post()) &&
+            $modelCatalog->load($request->post()) &&
+            $modelCertScan->load($request->post())
+        ){
+            $image = UploadedFile::getInstance($product, 'image');
+            if($image){
+                if($product->img_src){
+                    unlink_if_exists(Yii::getAlias("@webroot" ). "/" . $product->img_src);
+                }
+                $product->img_src = saveUniFile("uploads/product/image/", $image->tempName, $image->name, ["extension" => ["jpg", "png", "jpeg"]]);
+            }
+            $package = Package::findOne(["id" => $product->package]);
+            if(!is_null($package)){
+                $product->package_id = $package->id;
+            }else{
+                $package = new Package();
+                $package->name = $product->package;
+                $package->save();
+                $newPackage = Package::findOne(['name' => $package->name]);
+                $product->package_id = $newPackage->id;
+            }
+            if( !$this->isDateSet() ){
+                addAlert("warning", t_app("Период \"Доступность предложения\" не установлен!"));
+                return $this->render('update', $renderParams);
+            }else{
+                $date_begin =  date( 'Y-m-d H:i:s', strtotime( Yii::$app->request->post('avail_from') ) );
+                $date_end =  date( 'Y-m-d H:i:s', strtotime( Yii::$app->request->post('avail_to') ) );
+                $product->avail_from = $date_begin;
+                $product->avail_to = $date_end;
+            }
+            $product->country = getCountryList()[$product->country];
+
+            $infoAttachments = UploadedFile::getInstances($product, 'attach_files');
+            if( !empty($infoAttachments)){
+                $arr = Json::decode($product->info_attach);
+                foreach ($infoAttachments as $img){
+                    $arr[]= saveUniFile("uploads/product/attachments/", $img->tempName, $img->name);
+                }
+                $product->info_attach = Json::encode($arr);
+            }
+
+
+            if($product->save())
+            {
+                $scan_imgs = UploadedFile::getInstances($modelCertScan, 'scan_img');
+                if(!empty($scan_imgs)){
+                    $prodCertScanText = $modelCertScan->scan_text;
+                    for ($i=0; $i<sizeof($scan_imgs); $i++) {
+                        if ( $img = $scan_imgs[$i] ) {
+                            $prodScan = new ProductCertScan();
+                            $prodScan->product_id = $product->getPrimaryKey();
+                            $prodScan->text = $prodCertScanText[$i];
+                            $prodScan->src = saveUniFile("uploads/product/certificate/", $img->tempName, $img->name, ["extension" => ["jpg", "png", "jpeg"]]);
+                            $prodScan->save();
+                        }
+                    }
+                }
+                $catalog_files = UploadedFile::getInstances($modelCatalog, "files");
+                if( !empty($catalog_files) ){
+                    $catalog_langs = $modelCatalog->langs;
+                    for ($i=0; $i<sizeof($catalog_files); $i++) {
+                        $file = $catalog_files[$i];
+                        if($file){
+                            $cat = new Catalog();
+                            $cat->product_id = $product->getPrimarykey();
+                            $cat->lang = $catalog_langs[$i];
+                            $cat->src = saveUniFile("uploads/product/catalog/", $file->tempName, $file->name, ['extensions' => ["pdf"]]);
+                            $cat->save(false);
+                        }
+                    }
+                }
+                $product->categoriesAfterSave();
+                $product->incotermsListAfterSave();
+                $product->groupListAfterSave();
+                $product->provideListAfterSave();
+                addAlert('success', t_app('Продукт изменен!'));
+                return $this->redirect(['/admin/product/all/index', 'id' => $product->id]);
+            }
+        }
+        return $this->render('update', $renderParams);
+    }
+
+
+    public function actionDelete($id)
+    {
+        $this->findModel($id)->delete();
+        addAlert('warning', t_app('Продукт удален!'));
+        return $this->redirect('index');
+    }
+
+    public function actionConfirm($id){
+        $model = $this->findModel($id);
+        $model->is_confirmed = true;
+        $model->is_rejected = false;
+        if( $model->save(false) ){
+            addAlert('success', 'Продукт подтвержден!');
+        }else{
+            addAlert('danger', 'Не удалось выполнить операцию!');
+        }
+        return $this->redirect('index');
+    }
+
+    public function actionReject(){
+        $res = \Yii::$app->request;
+        if(!$res->post('prod_id')){
+            throw new UserException('Неверный запрос!');
+        }
+        $id = $res->post('prod_id');
+        $model = $this->findModel($id);
+        $model->is_confirmed = false;
+        $model->is_rejected = true;
+        if($res->post('reason_content')){
+            $msg = $res->post('reason_content');
+            $model->is_rejected_text = $msg;
+        }else{
+            $model->is_rejected_text = null;
+        }
+        if( $model->save(false) ){
+            addAlert('warning', 'Продукт отклонен!');
+        }else{
+            addAlert('danger', 'Не удалось выполнить операцию!');
+        }
+        return $this->redirect('index');
+    }
+
+    protected function findModel($id)
+    {
+        if (($model = Product::findOne(['id=:user_id', 'user_id' => $id])) !== null) {
+            return $model;
+        }
+        throw new UserException(t_app('Продукт не найден'));
+    }
+
+    public function actionDownloadCatalog($id)
+    {
+        $catalog = Catalog::findOne($id);
+        $path=Yii::getAlias('@webroot').'/'.$catalog->src;
+
+        if (file_exists($path)) {
+            return Yii::$app->response->sendFile($path);
+        }
+    }
+    public function actionDownloadAttachment($src)
+    {
+        if (file_exists($src)) {
+            return Yii::$app->response->sendFile($src);
+        }
+    }
+
+
+    public function actionDeleteCertScan(){
+        $request = Yii::$app->request;
+        if($request->isAjax){
+            if($id = $request->post('cert_scan_id')){
+                if( $scan = ProductCertScan::findOne($id) ){
+                    if(unlink_if_exists(Yii::getAlias("@webroot" ). "/" . $scan->src)){
+                        $scan->delete();
+                    }
+                }
+            }
+        }
+    }
+    public function actionDeleteCatalog(){
+        $request = Yii::$app->request;
+        if($request->isAjax){
+            if($id = $request->post('catalog_id')){
+                if( $catalog = Catalog::findOne($id) )
+                    if(unlink_if_exists(Yii::getAlias("@webroot" ). "/" . $catalog->src)){
+                        $catalog->delete();
+                    }
+            }
+        }
+    }
+    public function actionDeleteAttachment(){
+        $request = Yii::$app->request;
+        $model = null;
+        if($request->isAjax)
+        {
+            if($id = $request->post('product_id'))
+            {
+                $model = Product::findOne($id);
+                if( is_null($model) ) {
+                    return Json::encode(['error' => t_app('Произошла ошибка! Продукт не найден')]);
+                }
+                else if($paramPath = $request->post('file_path'))
+                {
+                    $attachments_paths = Json::decode($model->info_attach);
+                    foreach ($attachments_paths as $attachments_path)
+                    {
+                        if( $attachments_path === $paramPath )
+                        {
+                            $key_to_delete = array_search($attachments_path, $attachments_paths);
+                            unset($attachments_paths[$key_to_delete]);
+
+                            $model->info_attach = !empty($attachments_paths) ? Json::encode( array_values($attachments_paths) ) : null;
+                            $model->save(false);
+                            unlink_if_exists(Yii::getAlias("@webroot" ). "/" . $attachments_path);
+                            return;
+                            //return Json::encode(['path' => $attachments_paths]);
+                        }
+                    }
+
+                }
+            }
+        }
+    }
+    public function isDateSet(){
+        $date_begin =  Yii::$app->request->post('avail_from');
+        $date_end =  Yii::$app->request->post('avail_to');
+        return (!empty($date_begin) && !empty($date_end));
+    }
+}
